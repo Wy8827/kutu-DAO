@@ -7,7 +7,8 @@
 - The `near-sdk-rs` contract is the sole source of truth for circle rules, members, contributions, collateral, transfers, deadlines, payouts, cancellation, refunds, and storage charges.
 - React + TypeScript + Tailwind reads contract views and requests wallet-signed calls. It does not calculate authoritative balances. Recent circle IDs and transaction links are browser convenience data only; the financial state comes from the contract.
 - NEAR native transfer promises are asynchronous. Every outgoing transfer has a preallocated slot with a fixed recipient reference and amount, operation ID, attempt count, and state.
-- Excluded from this MVP: DAO frameworks, stablecoins, meta-transactions, external financial databases, AI agents, bridges, Intents, and Mainnet.
+- Supabase stores only chat messages and supplementary profiles. It cannot decide circle state, membership, contributions, payouts, refunds, or balances. Circle membership for chat is granted by an Edge Function only after a Testnet contract view confirms the authenticated wallet is a member.
+- Excluded from this MVP: DAO frameworks, stablecoins, meta-transactions for financial operations, AI agents, bridges, Intents, and Mainnet.
 
 ## Contract state (`contract/src/model.rs`)
 

@@ -80,7 +80,7 @@ Build the current create/join contract to Wasm:
 cargo near build non-reproducible-wasm --locked --no-abi
 ```
 
-`--no-abi` is currently needed on this Windows setup because the native ABI-generation step tries to link NEAR host functions into a Windows executable. The Wasm build itself succeeds. Before frontend contract integration, generate and check the contract ABI through a supported build path (for example, Linux/WSL) after the public contract methods are in place.
+`--no-abi` is currently needed on this Windows setup because the native ABI-generation step tries to link NEAR host functions into a Windows executable. The Wasm build itself succeeds. The frontend uses the known JSON view interface directly and does not consume generated ABI data.
 
 ### Current create/join test results
 
@@ -421,8 +421,18 @@ The Sandbox receipt failures and retries are actual local NEAR runtime receipts.
 
 ## Frontend integration and release verification — 2026-11-13
 
-The React application reads circle, member, round, storage-price, and per-member accounting data from contract view methods over the Testnet RPC. It submits contract mutations through a wallet configured explicitly for Testnet. Browser local storage contains only recently opened circle IDs and locally recorded transaction hashes/labels/timestamps; it does not store financial state. There is no Supabase or backend integration.
+The React application reads circle, member, round, storage-price, and per-member accounting data from contract view methods over the Testnet RPC. It submits contract mutations through a wallet configured explicitly for Testnet. Browser local storage contains only recently opened circle IDs and locally recorded transaction hashes/labels/timestamps; it does not store financial state. Supabase stores member chat and supplementary profiles only; see [supabase-chat.md](supabase-chat.md).
 
-The production build is `npm run build` (TypeScript check followed by Vite build). The Testnet RPC endpoint is fixed in the frontend source so an environment variable cannot redirect reads to another network. Contract account configuration uses `VITE_CONTRACT_ID` only. See the root README and [testnet-deployment.md](testnet-deployment.md) for current run and deployment instructions.
+The production build is `npm run build` (TypeScript check followed by Vite build). The Testnet RPC endpoint is fixed in the frontend source so an environment variable cannot redirect reads to another network. Contract account configuration uses `VITE_CONTRACT_ID`; optional chat configuration uses only the Supabase project URL and public anon key. See the root README, [testnet-deployment.md](testnet-deployment.md), and [supabase-chat.md](supabase-chat.md) for run and setup instructions.
+
+## Supabase member chat — 2026-11-13
+
+Added a Supabase migration, RLS policies, and three authenticated Edge Functions for one-use NEP-413 wallet challenges and Testnet contract membership checks. The browser chat panel loads prior messages, subscribes to circle-filtered Postgres Changes, displays profiles and connection state, and removes subscriptions when the circle changes. The database assigns sender identity from a server-verified NEAR account and applies content checks and a per-session send limit.
+
+Fresh verification: `npm run build` passed. `npm test` passed 2 frontend utility tests and 1 NEP-413 signing/verifier test. `cargo fmt --check` and all 29 native Rust tests passed. The Supabase database RLS suite is present at `supabase/tests/database/chat_rls.test.sql` but could not be run because the Supabase CLI and Docker are not installed in this environment. The Supabase project and Testnet contract are not configured here, so live Edge Function, database, Realtime, and wallet integration has not been exercised. WSL remains unavailable with `Wsl/E_ACCESSDENIED`, so no new Sandbox result is claimed.
 
 Handover verification on 2026-11-13: `npm run build` passed; `cargo fmt --manifest-path contract/Cargo.toml -- --check` passed; `cargo test --manifest-path contract/Cargo.toml --locked` passed 29 tests. `cargo near build non-reproducible-wasm --locked --no-abi` succeeded on Windows and produced a 228,215-byte artifact with SHA-256 `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. WSL was unavailable (`Wsl/E_ACCESSDENIED`), so the opt-in optimized-Wasm Sandbox suite was not rerun in this environment; the previously recorded Sandbox results above remain historical results. No Testnet deployment occurred.
+
+## Final deployment-preparation checks — 2026-11-13
+
+`cargo fmt --manifest-path contract/Cargo.toml -- --check` passed; native Rust tests passed 29/29. `cargo near build non-reproducible-wasm --manifest-path contract/Cargo.toml --locked --no-abi` rebuilt the 228,215-byte optimized artifact and explicitly ran `wasm-opt -O`; SHA-256 remained `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. The frontend production build passed. `npm test` passed 2 frontend tests and 9 shared/auth/membership tests. WSL returned `Wsl/E_ACCESSDENIED`, so Sandbox was not rerun; the previously recorded Sandbox result is for a separately built 228,159-byte artifact and does not verify this exact hash. No Testnet RPC state query, account creation, or deployment transaction was performed.

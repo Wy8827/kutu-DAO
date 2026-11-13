@@ -2,13 +2,19 @@
   "name": "kutu-dao",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["frontend"],
+  "workspaces": [
+    "frontend"
+  ],
   "scripts": {
     "dev": "npm run dev --workspace frontend",
     "build": "npm run build --workspace frontend",
-    "preview": "npm run preview --workspace frontend"
+    "preview": "npm run preview --workspace frontend",
+    "test": "npm run test --workspace frontend && node --test supabase/functions/_shared/near-auth.test.mjs supabase/functions/_shared/runtime-config.test.mjs supabase/functions/_shared/membership.test.mjs"
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "supabase": "^3.1.0"
   }
 }

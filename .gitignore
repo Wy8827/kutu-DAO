@@ -6,6 +6,8 @@ frontend/dist/
 frontend/.env.local
 frontend/.env.*.local
 contract/target/
+supabase/.temp/
+supabase/.branches/
 contract/.near/
 *.wasm
 *.key

@@ -1,6 +1,7 @@
 import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { NearConnector, type NearWalletBase } from '@hot-labs/near-connect';
+import { CircleChat } from './CircleChat';
 import './styles.css';
 
 const NETWORK = 'testnet' as const;
@@ -136,6 +137,7 @@ function App() {
           </div>
         </div>
       </div>
+      <CircleChat key={circle.id} circleId={String(circle.id)} account={account} wallet={wallet}/>
       </div>:<div className="empty-state"><div className="empty-symbol">◎</div><h3>Your circle will show up here.</h3><p>Open one with its ID, or create one above. No off-chain balance is treated as authoritative.</p></div>}
       </section>
       <section className="section how-section" id="how-it-works"><div className="section-heading compact"><div><div className="eyebrow"><span className="eyebrow-line"/>SMALL STEPS, SHARED MOMENTUM</div><h2>How a circle <em>turns.</em></h2></div><p>Every rule is written into the contract. The community decides to join; the code keeps the books.</p></div><div className="steps-grid"><Step number="01" title="Start together" text="Create a circle, share its ID, and let people join. Your place in line is the order you join."/><Step number="02" title="Put in your share" text="Every member contributes the same exact amount during each round’s window."/><Step number="03" title="Take your turn" text="Once everyone has paid—or eligible collateral covers a missed share—the scheduled member receives the pot."/><Step number="04" title="Keep it moving" text="The next round opens after a successful payout. If there is a shortfall, the circle pauses safely."/></div></section>
