@@ -1,0 +1,4 @@
+[env]
+# near-sdk's unit-testing dependency graph uses AWS-LC. Use its upstream
+# reproducible Windows x86-64 NASM objects during native tests.
+AWS_LC_SYS_PREBUILT_NASM = "1"
