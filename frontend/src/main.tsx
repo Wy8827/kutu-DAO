@@ -2,6 +2,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { NearConnector, type NearWalletBase } from '@hot-labs/near-connect';
 import { CircleChat } from './CircleChat';
+import { formatYoctoNearExact, payoutHistory, payoutParentTransaction, type PayoutParentTransaction } from './payout-history';
 import { circleIdFromSuccessValue, circlesCreatedBy, getSuccessValueBase64 } from './transaction-result';
 import './styles.css';
 
@@ -20,7 +21,7 @@ type Member = { account_id:string; payout_position:number; collateral_remaining_
 type RoundMember = { member_position:number; direct_payment_yocto:string; collateral_substitution_yocto:string; source:string; default_resolution:string };
 type Round = { number:number; recipient_position:number; opened_at_ns:string; deadline_ns:string; status:string; total_collected_yocto:string; payout:Transfer; contributions:RoundMember[] };
 type Accounting = { member:Member; rounds:RoundMember[] };
-type Activity = { hash:string; label:string; time:number };
+type Activity = PayoutParentTransaction;
 
 const connector = new NearConnector({ network: NETWORK, features: { testnet: true }, providers: { testnet: [RPC] }, autoConnect: false });
 
@@ -46,10 +47,13 @@ function errorText(error: unknown) { const message=error instanceof Error ? erro
 function App() {
   const [wallet, setWallet] = useState<NearWalletBase|null>(null);
   const [account, setAccount] = useState('');
-  const [circleId, setCircleId] = useState('');
+  const [recent, setRecent] = useState<string[]>(() => JSON.parse(localStorage.getItem('kutu:testnet:circles') || '[]') as string[]);
+  const [circleId, setCircleId] = useState(() => recent[0] || '');
   const [circle, setCircle] = useState<Circle|null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [round, setRound] = useState<Round|null>(null);
+  const [roundHistory, setRoundHistory] = useState<Round[]>([]);
+  const [roundHistoryError, setRoundHistoryError] = useState('');
   const [accounting, setAccounting] = useState<Accounting|null>(null);
   const [createdCircles, setCreatedCircles] = useState<Circle[]>([]);
   const [createdCirclesLoading, setCreatedCirclesLoading] = useState(false);
@@ -61,7 +65,6 @@ function App() {
   const [notice, setNotice] = useState('');
   const [activeTab, setActiveTab] = useState<'overview'|'activity'>('overview');
   const [activity, setActivity] = useState<Activity[]>(() => JSON.parse(localStorage.getItem('kutu:testnet:activity') || '[]') as Activity[]);
-  const [recent, setRecent] = useState<string[]>(() => JSON.parse(localStorage.getItem('kutu:testnet:circles') || '[]') as string[]);
   const [create, setCreate] = useState({ name:'', description:'', contribution:'0.1', collateral:'0.1', members:'2', interval:'86400' });
   const [joinBudget, setJoinBudget] = useState('0.01');
 
@@ -82,8 +85,14 @@ function App() {
       rpc<Circle>('get_circle',{circle_id:parsed}), rpc<Member[]>('get_members',{circle_id:parsed}), rpc<string>('get_storage_price_yocto',{}).catch(()=>STORAGE_PRICE_FALLBACK),
     ]);
     setCircle(nextCircle); setMembers(nextMembers); setStoragePrice(nextPrice);
-    const roundResult=await rpc<Round>('get_round',{circle_id:parsed,round_number:nextCircle.current_round}).catch(()=>null);
-    setRound(roundResult);
+    const lastRoundNumber=Math.min(Math.max(nextCircle.current_round,0),nextCircle.target_members-1);
+    const roundResults=await Promise.allSettled(
+      Array.from({length:lastRoundNumber+1},(_,roundNumber)=>rpc<Round>('get_round',{circle_id:parsed,round_number:roundNumber})),
+    );
+    const loadedRounds=roundResults.flatMap((result)=>result.status==='fulfilled'?[result.value]:[]).sort((left,right)=>left.number-right.number);
+    setRoundHistory(loadedRounds);
+    setRoundHistoryError(roundResults.some((result)=>result.status==='rejected')?'Some round records could not be loaded. Refresh to retry; available payout records remain contract-sourced.':'');
+    setRound(loadedRounds.find((item)=>item.number===nextCircle.current_round)||null);
     if (who && nextMembers.some((member)=>member.account_id===who)) setAccounting(await rpc<Accounting>('get_member_accounting',{circle_id:parsed,account_id:who}));
     else setAccounting(null);
     rememberCircle(id);
@@ -124,10 +133,10 @@ function App() {
   const paidCount=round?.contributions.filter((item)=>BigInt(item.direct_payment_yocto)>0n||BigInt(item.collateral_substitution_yocto)>0n).length||0;
   const joinDeposit=useMemo(()=> {try{return (BigInt(circle?.security_deposit_yocto||'0')+BigInt(yoctoFromNear(joinBudget))).toString();}catch{return '0';}},[circle?.security_deposit_yocto,joinBudget]);
 
-  const rememberTx=(hash:string,label:string)=> {const items=[{hash,label,time:Date.now()},...activity].slice(0,40);setActivity(items);localStorage.setItem('kutu:testnet:activity',JSON.stringify(items));};
+  const rememberTx=(hash:string,label:string,metadata?:Pick<Activity,'circleId'|'roundNumber'|'payout'>)=> {const items=[{hash,label,time:Date.now(),...metadata},...activity].slice(0,40);setActivity(items);localStorage.setItem('kutu:testnet:activity',JSON.stringify(items));};
   async function connect() { setBusy(true);setError('');try { const selected=await connector.connect();const accounts=await selected.getAccounts({network:NETWORK});if(!accounts[0])throw new Error('The wallet did not return a Testnet account.');setWallet(selected);setAccount(accounts[0].accountId);setNotice('Testnet wallet connected.'); }catch(e){setError(errorText(e));}finally{setBusy(false);} }
   async function disconnect() {try{await wallet?.signOut({network:NETWORK});await connector.disconnect(wallet||undefined);}catch(e){setError(errorText(e));}setWallet(null);setAccount('');setAccounting(null);}
-  async function transact(method:string,args:object,deposit='0',label=method) {if(!wallet||!account)throw new Error('Connect a NEAR Testnet wallet first.');if(!CONTRACT)throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local first.');setBusy(true);setError('');setCreatedCircleId('');setNotice('Review and approve the transaction in your wallet.');try{const outcome=await wallet.signAndSendTransaction({network:NETWORK,signerId:account,receiverId:CONTRACT,actions:[{type:'FunctionCall',params:{methodName:method,args,gas:GAS,deposit}}]});const successValueBase64=getSuccessValueBase64(outcome.status);const hash=outcome.transaction?.hash||'';if(hash)rememberTx(hash,label);setNotice(`${label} confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}.`);try{await refresh(circleId,account);}catch(refreshError){setError(`Transaction confirmed, but refreshing the previously open circle failed: ${errorText(refreshError)}`);}return {successValueBase64,transactionHash:hash};}catch(e){throw new Error(errorText(e));}finally{setBusy(false);}}
+  async function transact(method:string,args:object,deposit='0',label=method,metadata?:Pick<Activity,'circleId'|'roundNumber'|'payout'>) {if(!wallet||!account)throw new Error('Connect a NEAR Testnet wallet first.');if(!CONTRACT)throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local first.');setBusy(true);setError('');setCreatedCircleId('');setNotice('Review and approve the transaction in your wallet.');try{const outcome=await wallet.signAndSendTransaction({network:NETWORK,signerId:account,receiverId:CONTRACT,actions:[{type:'FunctionCall',params:{methodName:method,args,gas:GAS,deposit}}]});const successValueBase64=getSuccessValueBase64(outcome.status);const hash=outcome.transaction?.hash||'';if(hash)rememberTx(hash,label,metadata);setNotice(metadata?.payout?`Payout request transaction confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}. Check the on-chain payout status below.`:`${label} confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}.`);try{await refresh(circleId,account);}catch(refreshError){setError(`Transaction confirmed, but refreshing the previously open circle failed: ${errorText(refreshError)}`);}return {successValueBase64,transactionHash:hash};}catch(e){throw new Error(errorText(e));}finally{setBusy(false);}}
   async function run(action:()=>Promise<unknown>) {try{await action();}catch(e){setError(errorText(e));setNotice('');}}
   async function createCircle() {
     const contribution=yoctoFromNear(create.contribution);
@@ -171,8 +180,8 @@ function App() {
   async function doJoin() {if(!circle)throw new Error('Load a circle first.');const storage=yoctoFromNear(joinBudget);const deposit=(BigInt(circle.security_deposit_yocto)+BigInt(storage)).toString();await transact('join_circle',{circle_id:circle.id},deposit,'Join circle');}
   async function doExactPayment(method:string,label:string) {if(!circle)throw new Error('Load a circle first.');const amount=circle.contribution_yocto;await transact(method,{circle_id:circle.id},amount,label);}
   function transferSlot(t:Transfer, memberPosition?:number, roundNumber?:number) {if(t.kind==='Payout')return {RoundPayout:roundNumber};if(t.kind==='DepositRefund')return {MemberDepositRefund:memberPosition};if(t.kind==='CancellationRefund')return {MemberCancellationRefund:memberPosition};if(t.kind==='StorageAllowanceRefund')return memberPosition?{MemberStorageRefund:memberPosition}:'CircleStorageRefund';throw new Error('Unknown transfer type.');}
-  async function retry(t:Transfer, memberPosition?:number, roundNumber?:number) {if(!circle) return;await transact('retry_transfer',{circle_id:circle.id,slot:transferSlot(t,memberPosition,roundNumber),transfer_id:t.id},'0','Retry transfer');}
-  const action=(method:string,args:object={},label=method)=>run(()=>transact(method,{circle_id:circle!.id,...args},'0',label));
+  async function retry(t:Transfer, memberPosition?:number, roundNumber?:number) {if(!circle) return;const payoutMetadata=t.kind==='Payout'&&roundNumber!==undefined?{circleId:circle.id,roundNumber,payout:true}:undefined;await transact('retry_transfer',{circle_id:circle.id,slot:transferSlot(t,memberPosition,roundNumber),transfer_id:t.id},'0',t.kind==='Payout'?'Retry payout':'Retry transfer',payoutMetadata);}
+  const action=(method:string,args:object={},label=method)=>{const metadata=method==='finalize_payout'?{circleId:circle!.id,roundNumber:circle!.current_round,payout:true}:undefined;return run(()=>transact(method,{circle_id:circle!.id,...args},'0',label,metadata));};
 
   return <div className="app-shell">
     <header className="topbar"><a className="brand" href="#top"><span className="brand-mark">k</span><span>KUTU<span className="brand-light">/</span>DAO</span></a><nav><a href="#circles">Circles</a><a href="#how-it-works">How it works</a></nav><div className="wallet-area">{account?<><span className="network-pill"><i/>NEAR TESTNET</span><span className="account-chip">{account}</span><button className="button button-light button-small" onClick={()=>void disconnect()}>Disconnect</button></>:<button className="button button-dark button-small" disabled={busy} onClick={()=>void connect()}>Connect wallet <span>↗</span></button>}</div></header>
@@ -213,6 +222,7 @@ function App() {
           </div>
         </div>
       </div>
+      <PayoutHistoryPanel circleId={circle.id} rounds={roundHistory} activity={activity} error={roundHistoryError}/>
       <CircleChat key={circle.id} circleId={String(circle.id)} account={account} wallet={wallet}/>
       </div>:<div className="empty-state"><div className="empty-symbol">◎</div><h3>Your circle will show up here.</h3><p>Open one with its ID, or create one above. No off-chain balance is treated as authoritative.</p></div>}
       </section>
@@ -228,6 +238,25 @@ function Stat({label,value}:{label:string;value:string}){return <div className="
 function Metric({label,value}:{label:string;value:string}){return <div className="metric"><span>{label}</span><b>{value}</b></div>}
 function Step({number,title,text}:{number:string;title:string;text:string}){return <article className="step-card"><span>{number}</span><h3>{title}</h3><p>{text}</p></article>}
 function TransferRetry({transfer,busy,onRetry}:{transfer:Transfer;busy:boolean;onRetry:()=>void}){return <div className="transfer-failed"><span>↻</span><div><b>Transfer failed · attempt {transfer.attempts}</b><small>{near(transfer.amount_yocto)} entitlement is still recorded for {transfer.recipient_id||'the saved recipient'}.</small></div><button disabled={busy} onClick={onRetry}>Retry transfer</button></div>}
-function ActivityList({activity}:{activity:Activity[]}) {return activity.length?<div className="activity-list">{activity.map((item)=><a key={item.hash} href={`https://testnet.nearblocks.io/txns/${item.hash}`} target="_blank" rel="noreferrer"><span className="activity-check">✓</span><div><b>{item.label}</b><small>{new Date(item.time).toLocaleString()}</small></div><code>{shortHash(item.hash)}</code><span>↗</span></a>)}</div>:<div className="activity-empty">Confirmed actions from this browser will appear here. For full history, use the Testnet Explorer link on each transaction.</div>}
+function PayoutHistoryPanel({circleId,rounds,activity,error}:{circleId:number;rounds:Round[];activity:Activity[];error:string}) {
+  const records=payoutHistory(rounds);
+  return <section className="panel payout-history-panel" aria-labelledby="payout-history-title">
+    <div className="panel-heading"><div><span className="panel-kicker">CONTRACT RECORDS</span><h4 id="payout-history-title">Payout history</h4></div><span className="member-count">{records.length} {records.length===1?'payout':'payouts'}</span></div>
+    <p className="payout-history-note">Status, recipient, and amount come from each on-chain round payout record. A NEARBlocks link, when available, points to the parent wallet transaction, not a separate transfer hash.</p>
+    {records.length===0?<p className="payout-history-empty">No payout transfer has been started for this circle yet.</p>:<div className="payout-history-list">{records.map((roundRecord)=>{
+      const payout=roundRecord.payout;
+      const parent=payoutParentTransaction(activity,circleId,roundRecord.number);
+      return <article className="payout-history-row" key={roundRecord.number}>
+        <div className="payout-history-round"><b>Round {roundRecord.number+1}</b><span className={`payout-state payout-state-${payout.state.toLowerCase()}`}>{payout.state}</span></div>
+        <div className="payout-history-recipient"><small>Recipient</small><code>{payout.recipient_id||'Unavailable from contract view'}</code></div>
+        <div className="payout-history-amount"><small>Actual payout</small><b>{formatYoctoNearExact(payout.amount_yocto)}</b></div>
+        <div className="payout-history-transaction">{parent?<a href={`https://testnet.nearblocks.io/txns/${parent.hash}`} target="_blank" rel="noreferrer">Parent transaction · {shortHash(parent.hash)} ↗</a>:<small>No parent transaction link was saved in this browser.</small>}</div>
+      </article>;
+    })}</div>}
+    {error&&<p className="payout-history-error" role="status">{error}</p>}
+  </section>;
+}
+
+function ActivityList({activity}:{activity:Activity[]}) {return activity.length?<div className="activity-list">{activity.map((item)=><a key={item.hash} href={`https://testnet.nearblocks.io/txns/${item.hash}`} target="_blank" rel="noreferrer"><span className="activity-check">✓</span><div><b>{item.label}</b><small>{new Date(item.time).toLocaleString()}{item.circleId!==undefined&&item.roundNumber!==undefined?` · Circle #${item.circleId} · Round ${item.roundNumber+1}`:''}{item.payout?' · Parent transaction':''}</small></div><code>{shortHash(item.hash)}</code><span>↗</span></a>)}</div>:<div className="activity-empty">Confirmed actions from this browser will appear here. For full history, use the Testnet Explorer link on each transaction.</div>}
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App/></StrictMode>);
