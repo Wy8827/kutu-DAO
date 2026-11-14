@@ -6,6 +6,7 @@ import './styles.css';
 
 const NETWORK = 'testnet' as const;
 const RPC = 'https://rpc.testnet.near.org';
+const RPC_READ_ENDPOINT = import.meta.env.DEV ? '/api/near-rpc' : RPC;
 const CONTRACT = import.meta.env.VITE_CONTRACT_ID || '';
 const STORAGE_PRICE_FALLBACK = '10000000000000000000';
 const CREATE_STORAGE_BYTES_ESTIMATE = 6000n; // Sandbox measured 4,545 bytes; 20%+ buffer for name and description.
@@ -26,7 +27,7 @@ function utf8Base64(value: string) { const bytes = new TextEncoder().encode(valu
 function decodeBase64Utf8(value: string) { const binary = atob(value); return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))); }
 async function rpc<T>(method: string, args: object): Promise<T> {
   if (!CONTRACT) throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local to use contract features.');
-  const response = await fetch(RPC, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0', id:'kutu', method:'query', params:{request_type:'call_function', finality:'final', account_id:CONTRACT, method_name:method, args_base64:utf8Base64(JSON.stringify(args))}}) });
+  const response = await fetch(RPC_READ_ENDPOINT, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0', id:'kutu', method:'query', params:{request_type:'call_function', finality:'final', account_id:CONTRACT, method_name:method, args_base64:utf8Base64(JSON.stringify(args))}}) });
   const body = await response.json();
   if (!response.ok || body.error) throw new Error(body.error?.cause?.name || body.error?.message || `RPC request failed (${response.status})`);
   const output = new Uint8Array(body.result.result);
@@ -91,7 +92,22 @@ function App() {
   async function disconnect() {try{await wallet?.signOut({network:NETWORK});await connector.disconnect(wallet||undefined);}catch(e){setError(errorText(e));}setWallet(null);setAccount('');setAccounting(null);}
   async function transact(method:string,args:object,deposit='0',label=method) {if(!wallet||!account)throw new Error('Connect a NEAR Testnet wallet first.');if(!CONTRACT)throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local first.');setBusy(true);setError('');setNotice('Review and approve the transaction in your wallet.');try{const outcome=await wallet.signAndSendTransaction({network:NETWORK,signerId:account,receiverId:CONTRACT,actions:[{type:'FunctionCall',params:{methodName:method,args,gas:GAS,deposit}}]});const status=outcome.status as {SuccessValue?:string;Failure?:unknown};if(status.Failure)throw new Error(JSON.stringify(status.Failure));const hash=outcome.transaction?.hash||'';if(hash)rememberTx(hash,label);setNotice(`${label} confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}.`);await refresh(circleId,account);return status.SuccessValue?decodeBase64Utf8(status.SuccessValue):'';}catch(e){throw new Error(errorText(e));}finally{setBusy(false);}}
   async function run(action:()=>Promise<unknown>) {try{await action();}catch(e){setError(errorText(e));setNotice('');}}
-  async function createCircle() {const contribution=yoctoFromNear(create.contribution);const collateral=yoctoFromNear(create.collateral);const interval=BigInt(create.interval)*1_000_000_000n;if(!create.name.trim())throw new Error('Add a circle name.');if(new TextEncoder().encode(create.name).length>64||new TextEncoder().encode(create.description).length>280)throw new Error('Name and description limits are measured in UTF-8 bytes.');if(!Number.isInteger(Number(create.members))||Number(create.members)<2||Number(create.members)>10)throw new Error('Choose a target between 2 and 10 members.');if(interval<60_000_000_000n||interval>31_536_000_000_000_000n)throw new Error('Payment interval must be from 60 seconds to 365 days.');const storageDeposit=(BigInt(storagePrice)*CREATE_STORAGE_BYTES_ESTIMATE).toString();const value=await transact('create_circle',{name:create.name,description:create.description||null,max_members:Number(create.members),contribution_yocto:contribution,security_deposit_yocto:collateral,payment_interval_ns:interval.toString()},storageDeposit,'Create circle');const id=decodeCircleId(value);setCircleId(String(id));setNotice(`Circle #${id} created. Join it explicitly to take a payout position.`);}
+  async function createCircle() {
+    const contribution=yoctoFromNear(create.contribution);
+    const collateral=yoctoFromNear(create.collateral);
+    const interval=BigInt(create.interval)*1_000_000_000n;
+    if(!create.name.trim())throw new Error('Add a circle name.');
+    if(new TextEncoder().encode(create.name).length>64||new TextEncoder().encode(create.description).length>280)throw new Error('Name and description limits are measured in UTF-8 bytes.');
+    if(!Number.isInteger(Number(create.members))||Number(create.members)<2||Number(create.members)>10)throw new Error('Choose a target between 2 and 10 members.');
+    if(interval<60_000_000_000n||interval>31_536_000_000_000_000n)throw new Error('Payment interval must be from 60 seconds to 365 days.');
+    const intervalNumber=Number(interval);
+    if(BigInt(intervalNumber)!==interval)throw new Error('Payment interval cannot be represented exactly as a JSON number.');
+    const storageDeposit=(BigInt(storagePrice)*CREATE_STORAGE_BYTES_ESTIMATE).toString();
+    const value=await transact('create_circle',{args:{name:create.name,description:create.description||null,max_members:Number(create.members),contribution_yocto:contribution,security_deposit_yocto:collateral,payment_interval_ns:intervalNumber}},storageDeposit,'Create circle');
+    const id=decodeCircleId(value);
+    setCircleId(String(id));
+    setNotice(`Circle #${id} created. Join it explicitly to take a payout position.`);
+  }
   function decodeCircleId(base64:string) {const decoded=decodeBase64Utf8(base64);try{return Number(JSON.parse(decoded) as string|number);}catch{return Number(decoded);}}
   async function doJoin() {if(!circle)throw new Error('Load a circle first.');const storage=yoctoFromNear(joinBudget);const deposit=(BigInt(circle.security_deposit_yocto)+BigInt(storage)).toString();await transact('join_circle',{circle_id:circle.id},deposit,'Join circle');}
   async function doExactPayment(method:string,label:string) {if(!circle)throw new Error('Load a circle first.');const amount=circle.contribution_yocto;await transact(method,{circle_id:circle.id},amount,label);}

@@ -1,6 +1,6 @@
 # Kutu DAO architecture
 
-**Status:** lifecycle policy implemented in the Rust contract; native and optimized-Wasm Sandbox verification recorded in `docs/development.md`. This is a Testnet-only MVP design; no Testnet deployment is authorized or performed.
+**Status:** lifecycle policy implemented in the Rust contract; native Rust tests and optimized-Wasm Sandbox verification are recorded in `docs/development.md`. The owner reports version 0.1.0 deployed and initialized on NEAR Testnet at `kutunear.testnet`; see `docs/testnet-deployment.md` for the deployment record and read-only verification steps. This is a Testnet-only MVP design.
 
 ## System boundary
 
@@ -78,6 +78,7 @@ The initial deployed contract footprint is outside circle accounting and must be
 - No administrator-controlled recovery exists. If a member never consents to cancellation, a pre-payout circle cannot cancel and retains its recorded liabilities; an unresolved default remains Paused indefinitely.
 - Asynchronous native transfers may fail if recipient account state disallows receiving. Saved entitlements remain retryable, but eventual success depends on recipient account availability and chain operation.
 - Sandbox measurements are local runtime results, not Testnet receipts or a formal audit.
-- No deployment or upgrade authority/migration policy is implemented. Schema changes require fresh deployment unless a reviewed migration is added.
+- The owner reports a live Testnet demonstration in which Circle #1 reached `Completed` after two members completed two contribution rounds. This reported state is not independently re-queried by this architecture document. No formal security audit is claimed.
+- No in-contract admin upgrade or migration entrypoint is implemented. Schema changes require a reviewed migration plan; redeploying to the existing account can affect its deployed state and must not be done casually.
 
 See [business-rules.md](business-rules.md), [financial-lifecycle.md](financial-lifecycle.md), and [development.md](development.md).

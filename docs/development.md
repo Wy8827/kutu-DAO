@@ -2,6 +2,19 @@
 
 Checked against official instructions on 2026-11-13. Open a new PowerShell window after installing tools so the updated PATH is loaded.
 
+## Current verification status — 2026-11-14
+
+These checks are distinct from the hosted Testnet deployment reported by the owner:
+
+- **Native Rust tests:** `cargo test --manifest-path contract/Cargo.toml --locked` passed 29 tests.
+- **Optimized WASM build (2026-11-13):** `cargo near build non-reproducible-wasm --manifest-path contract/Cargo.toml --locked --no-abi` produced the 228,215-byte optimized artifact at `contract/target/near/kutu_dao_contract.wasm`; SHA-256 `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. The recorded build ran `wasm-opt -O`.
+- **NEAR Sandbox integration:** `AWS_LC_SYS_PREBUILT_NASM=0 cargo test --locked --features sandbox-tests --test sandbox -- --nocapture` passed 1 test on 2026-11-14 in Ubuntu under WSL2. The test loads the project artifact via `include_bytes!`; this is local Sandbox execution, not Testnet execution.
+- **Frontend:** `npm test` passed 11 tests (2 frontend and 9 shared/auth/membership); `npm run build` passed.
+- **Local Supabase database:** the empty-database migration and pgTAP suite passed 34 tests, and the anonymous REST security smoke test passed. These are local database checks, not hosted Supabase integration.
+- **Testnet:** the owner reports the contract was deployed and initialized at `kutunear.testnet` (version 0.1.0; deployment transaction `HDgoZ6pabkwVPSDHXCvyj9PzLTyUff78P68CdXrQMrKA`). The owner also reports Circle #1 was joined by two members, completed two contribution rounds, and reached `Completed`, which the frontend displayed. This is an owner-reported live demonstration and was not independently re-queried during this documentation update. Hosted Supabase chat remains unverified. See [testnet-deployment.md](testnet-deployment.md).
+
+The dated verification notes later in this file are retained as historical records. Where they say Sandbox, Supabase, or WSL checks were unavailable, those statements describe that earlier run and are superseded by this current status.
+
 ## Already available
 
 - Node.js 24.21.0
@@ -62,7 +75,7 @@ npm install
 npm run dev
 ```
 
-The frontend uses `@hot-labs/near-connect` with `network: 'testnet'` and a Testnet-only wallet feature filter. Contract reads use `https://rpc.testnet.near.org`; wallet account lookup, signing, and sign-out explicitly pass `network: 'testnet'`. Set `VITE_CONTRACT_ID` in the ignored `frontend/.env.local` after a Testnet deployment. No key or credential belongs in a Vite environment variable. See [testnet-deployment.md](testnet-deployment.md).
+The frontend uses `@hot-labs/near-connect` with `network: 'testnet'` and a Testnet-only wallet feature filter. Wallet account lookup, signing, and sign-out explicitly pass `network: 'testnet'`. During local development, reads go through `/api/near-rpc`; Vite forwards them to the optional `NEAR_RPC_URL` from `frontend/.env.local`, or to public Testnet RPC if it is unset. The URL is server-side development configuration and must not use the `VITE_` prefix. Production builds do not require it and currently read from the public Testnet RPC directly; no production RPC proxy is configured. `VITE_CONTRACT_ID` is set to `kutunear.testnet` in the checked-in example. Do not place keys or credentials in frontend variables. See [testnet-deployment.md](testnet-deployment.md).
 
 ## Contract development checks
 
@@ -218,14 +231,13 @@ That is 5.87 Tgas for creation, 64.66 Tgas total across ten joins, and 6.79 Tgas
 
 > This section records the earlier create/join-only audit and is superseded by the lifecycle implementation update below. Statements about financial entrypoints being absent describe the code at that earlier audit point, not the current contract.
 
-## Smart-contract security and correctness audit
+## Historical bounded code review (not a security audit)
 
-Audit performed on 2026-11-13 against `contract/src/lib.rs`, `contract/src/model.rs`, `contract/src/accounting.rs`, the native tests, and the optimized-WASM Sandbox test. The code inventory is important: the current contract implements initialization, storage-price reading, circle creation, joining, and excess-storage-refund transfer/retry/callback. The `Member`, `Round`, and transfer models contain placeholders for future finance, but there are currently **no callable contribution, default, cure, payout, deposit-refund, or cancellation methods**. The target architecture and business-rules documents describe those approved future flows; they do not mean those methods already exist.
+This is a historical, bounded internal code review performed on 2026-11-13, not a security audit or third-party assessment. Its description is a snapshot of the implementation at that time and is superseded by the lifecycle implementation and verification sections later in this document. The contract now implements the contribution, default, cure, payout, refund, retry, and cancellation methods documented in the current architecture and source.
 
 ### Findings by severity
 
-- **Critical — none found in the implemented create/join/storage-refund paths.** This is a bounded code review, not a formal verification or independent third-party audit.
-- **High / release blocker — financial lifecycle is not implemented.** There is no contract path to accept a round contribution, deduct collateral, finalize a payout, pause/cure a default, refund collateral, or cancel a circle. No security property or test claim is made for those absent paths. Do not use this contract for a financially active circle or treat it as ready for financial Testnet integration. Implement each agreed flow and audit/test it before deployment.
+- This historical review did not establish security assurance. Its scoped observations applied to create/join/storage-refund paths at that snapshot only; they are not conclusions about the current implementation.
 - **Medium — first deadline can be zero or in the past.** `Circle::open` rejects a zero interval and checks arithmetic overflow, but does not validate `first_deadline_ns` against the current block timestamp. If default processing is later implemented using that deadline, a circle can become Active with its first deadline already elapsed. Proposed remediation before implementing defaults: agree and enforce whether creation must specify a future deadline and whether the final join must occur before it, or whether deadlines instead begin on activation. No rule was silently selected here.
 - **Medium — optimized-WASM failure path is not exercised end to end.** Native tests simulate a failed promise result and verify Failed → retry Pending → Succeeded, same ID/recipient/amount, duplicate retry rejection, stale-attempt rejection, and pending-total restoration. The Sandbox test runs optimized Wasm for create/join and verifies rejection cases and callback privacy, but does not force an actual transfer receipt failure or inspect transfer state after callback. Add a Sandbox failure/retry scenario with a contract-level inspection method or equivalent test-only observation before relying on receipt-level behavior for financial transfers.
 - **Low — query surface is incomplete.** The only read method is `get_storage_price_yocto`; there are no circle/member/round views. The future frontend cannot yet verify on-chain membership positions or financial state through a supported view API. Add bounded, read-only views before frontend integration.
@@ -308,7 +320,7 @@ At the Sandbox price of 10^19 yoctoNEAR per byte, measured storage is 0.04545 NE
 
 - The actual failed-transfer and retry gap is now closed by the Sandbox scenario below. Native tests remain useful for deliberately injected stale/duplicate callback results, which are not naturally emitted by Sandbox after a single promise chain.
 - Recheck worst-case callback gas and storage neutrality after any schema or callback change. The current maximum-capacity payout callback succeeds in Sandbox, but it does not cover every worst-case refund/failure combination.
-- No independent security audit, Testnet integration, or Testnet deployment has occurred for the full financial lifecycle. The contract is **not ready for a Testnet launch** until these checks and a release review are complete.
+- Historical release-status note (2026-11-13): at that point, Testnet integration/deployment remained outstanding. The owner subsequently reported deployment and a completed Circle #1 demonstration; see the current status at the start of this document.
 
 ## Actual Sandbox failed-transfer and retry verification — 2026-11-13
 
@@ -340,7 +352,7 @@ SANDBOX_FAILED_TRANSFER_RETRY transfer_id=41 failed_attempt=1 retry_attempt=2 am
 
 Gas figures include the initiating/retry transaction and their receipt chains as reported by near-workspaces. Storage deltas are the contract account's measured storage usage immediately before and after the corresponding receipt chain. No production contract code needed modification for this scenario; the change is in the Sandbox test and this documentation.
 
-The transfer failure/retry path has now been exercised with an actual optimized-Wasm Sandbox receipt failure, not only simulated promise results. It is ready to proceed to a separate release-readiness review. This does not mean the contract has been independently audited or deployed to Testnet; no Testnet deployment or financial transaction occurred.
+At the time of this 2026-11-13 verification, the transfer failure/retry path had been exercised with an actual optimized-Wasm Sandbox receipt failure. This local result did not establish Testnet deployment or Testnet integration.
 
 ## Release hardening phase 1 — creation amount validation — 2026-11-13
 
@@ -348,13 +360,11 @@ The transfer failure/retry path has now been exercised with an actual optimized-
 
 Added native boundary coverage for ordinary values, the largest valid contribution for target 2, the first overflowing contribution for target 2, the same amount accepted at target 2 and rejected at target 3, zero contribution, and target 1. Existing tests were preserved.
 
-### Deadline interval review — policy pending approval
+### Deadline interval policy — approved and implemented
 
-`payment_interval_ns` is an unsigned 64-bit count of nanoseconds. The first deadline is computed as activation block timestamp plus that interval in `Circle::append_member`; each subsequent deadline is computed as the successful payout callback's block timestamp plus the same interval. Both additions use `checked_add`. No minimum or maximum interval is currently enforced, and this phase does not add one.
+`payment_interval_ns` is an unsigned 64-bit count of nanoseconds, configurable from 60 seconds through 365 days inclusive. The first deadline is computed from activation time, and each subsequent deadline begins after the previous payout succeeds. Timestamp additions use `checked_add`; payout initiation and retry preflight the next deadline so an overflow cannot occur after funds have been sent.
 
-Policy proposal for product review: keep the interval creator-configurable; require a minimum of 60 seconds and a maximum of 365 days. A one-minute minimum gives members a practical response window and reduces accidental immediate defaults, while still permitting short test circles; a one-year maximum bounds dormant schedules but allows long-running savings circles. The trade-off is that the lower bound removes very short production schedules and the upper bound excludes multi-year schedules. These values are recommendations only, not approved business rules.
-
-Regardless of the chosen range, arithmetic should remain checked when opening the first round and every later round. Before scheduling a non-final payout, the contract should also verify that the next deadline can be represented at the current block timestamp. Today the later `checked_add` is inside the success callback, after the transfer receipt has sent funds. If that addition overflowed, callback state could revert after the recipient has received funds, leaving the saved transfer retryable and creating a duplicate-payment risk. The appropriate remediation depends on approving the deadline policy and should be implemented with a regression test before financial deployment.
+At the theoretical `u64` clock boundary, a successful payout is recorded and the circle enters `ClockExhausted`; the transfer is not left retryable. The native and Sandbox coverage for these paths is summarized in the current verification status and the release-hardening record below.
 
 ### Verification
 
@@ -423,16 +433,16 @@ The Sandbox receipt failures and retries are actual local NEAR runtime receipts.
 
 The React application reads circle, member, round, storage-price, and per-member accounting data from contract view methods over the Testnet RPC. It submits contract mutations through a wallet configured explicitly for Testnet. Browser local storage contains only recently opened circle IDs and locally recorded transaction hashes/labels/timestamps; it does not store financial state. Supabase stores member chat and supplementary profiles only; see [supabase-chat.md](supabase-chat.md).
 
-The production build is `npm run build` (TypeScript check followed by Vite build). The Testnet RPC endpoint is fixed in the frontend source so an environment variable cannot redirect reads to another network. Contract account configuration uses `VITE_CONTRACT_ID`; optional chat configuration uses only the Supabase project URL and public anon key. See the root README, [testnet-deployment.md](testnet-deployment.md), and [supabase-chat.md](supabase-chat.md) for run and setup instructions.
+The production build is `npm run build` (TypeScript check followed by Vite build). Local development reads use the Vite proxy, with optional server-side `NEAR_RPC_URL` configured in ignored `frontend/.env.local`; absent that setting, it falls back to public Testnet RPC. `NEAR_RPC_URL` is never exposed as a Vite client variable. Production reads currently use public Testnet RPC directly. Contract account configuration uses `VITE_CONTRACT_ID`; optional chat configuration uses only the Supabase project URL and public anon key. See the root README, [testnet-deployment.md](testnet-deployment.md), and [supabase-chat.md](supabase-chat.md) for run and setup instructions.
 
 ## Supabase member chat — 2026-11-13
 
 Added a Supabase migration, RLS policies, and three authenticated Edge Functions for one-use NEP-413 wallet challenges and Testnet contract membership checks. The browser chat panel loads prior messages, subscribes to circle-filtered Postgres Changes, displays profiles and connection state, and removes subscriptions when the circle changes. The database assigns sender identity from a server-verified NEAR account and applies content checks and a per-session send limit.
 
-Fresh verification: `npm run build` passed. `npm test` passed 2 frontend utility tests and 1 NEP-413 signing/verifier test. `cargo fmt --check` and all 29 native Rust tests passed. The Supabase database RLS suite is present at `supabase/tests/database/chat_rls.test.sql` but could not be run because the Supabase CLI and Docker are not installed in this environment. The Supabase project and Testnet contract are not configured here, so live Edge Function, database, Realtime, and wallet integration has not been exercised. WSL remains unavailable with `Wsl/E_ACCESSDENIED`, so no new Sandbox result is claimed.
+Historical verification snapshot (2026-11-13): the Supabase database suite and Sandbox run were unavailable in that environment, and hosted Supabase/Testnet wallet integration had not been exercised. Since then, the local Supabase CLI and Docker were installed and the local migration, 34 pgTAP tests, and anonymous REST smoke test passed. The optimized-WASM Sandbox test was rerun successfully on 2026-11-14. The owner later reports a live Testnet contract workflow for Circle #1; hosted Supabase chat and its live integration remain unverified.
 
-Handover verification on 2026-11-13: `npm run build` passed; `cargo fmt --manifest-path contract/Cargo.toml -- --check` passed; `cargo test --manifest-path contract/Cargo.toml --locked` passed 29 tests. `cargo near build non-reproducible-wasm --locked --no-abi` succeeded on Windows and produced a 228,215-byte artifact with SHA-256 `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. WSL was unavailable (`Wsl/E_ACCESSDENIED`), so the opt-in optimized-Wasm Sandbox suite was not rerun in this environment; the previously recorded Sandbox results above remain historical results. No Testnet deployment occurred.
+Historical handover snapshot (2026-11-13): the native tests, frontend build, and optimized WASM build passed, producing the 228,215-byte artifact with SHA-256 `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. WSL access was unavailable at that time, so the Sandbox suite was not rerun in that session. The 2026-11-14 Sandbox pass is recorded above. No Testnet deployment occurred.
 
 ## Final deployment-preparation checks — 2026-11-13
 
-`cargo fmt --manifest-path contract/Cargo.toml -- --check` passed; native Rust tests passed 29/29. `cargo near build non-reproducible-wasm --manifest-path contract/Cargo.toml --locked --no-abi` rebuilt the 228,215-byte optimized artifact and explicitly ran `wasm-opt -O`; SHA-256 remained `c05d249dd7dd6e6a2587ad2d0f420424479b1df78ef3cdbb8d5f75630871735b`. The frontend production build passed. `npm test` passed 2 frontend tests and 9 shared/auth/membership tests. WSL returned `Wsl/E_ACCESSDENIED`, so Sandbox was not rerun; the previously recorded Sandbox result is for a separately built 228,159-byte artifact and does not verify this exact hash. No Testnet RPC state query, account creation, or deployment transaction was performed.
+Historical deployment-preparation snapshot (2026-11-13): native tests, optimized WASM compilation, frontend tests, and production build passed. At that time, the Sandbox result available in that session referred to an earlier 228,159-byte artifact; the 228,215-byte artifact had not yet been Sandbox-tested there. The exact artifact was subsequently exercised by the passing Sandbox test recorded above. No Testnet RPC state query, account creation, or deployment transaction was performed in that snapshot.
