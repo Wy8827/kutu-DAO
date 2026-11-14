@@ -2,6 +2,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { NearConnector, type NearWalletBase } from '@hot-labs/near-connect';
 import { CircleChat } from './CircleChat';
+import { circleIdFromSuccessValue, circlesCreatedBy, getSuccessValueBase64 } from './transaction-result';
 import './styles.css';
 
 const NETWORK = 'testnet' as const;
@@ -24,7 +25,6 @@ type Activity = { hash:string; label:string; time:number };
 const connector = new NearConnector({ network: NETWORK, features: { testnet: true }, providers: { testnet: [RPC] }, autoConnect: false });
 
 function utf8Base64(value: string) { const bytes = new TextEncoder().encode(value); let binary = ''; bytes.forEach((byte) => { binary += String.fromCharCode(byte); }); return btoa(binary); }
-function decodeBase64Utf8(value: string) { const binary = atob(value); return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0))); }
 async function rpc<T>(method: string, args: object): Promise<T> {
   if (!CONTRACT) throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local to use contract features.');
   const response = await fetch(RPC_READ_ENDPOINT, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0', id:'kutu', method:'query', params:{request_type:'call_function', finality:'final', account_id:CONTRACT, method_name:method, args_base64:utf8Base64(JSON.stringify(args))}}) });
@@ -51,6 +51,10 @@ function App() {
   const [members, setMembers] = useState<Member[]>([]);
   const [round, setRound] = useState<Round|null>(null);
   const [accounting, setAccounting] = useState<Accounting|null>(null);
+  const [createdCircles, setCreatedCircles] = useState<Circle[]>([]);
+  const [createdCirclesLoading, setCreatedCirclesLoading] = useState(false);
+  const [createdCirclesError, setCreatedCirclesError] = useState('');
+  const [createdCircleId, setCreatedCircleId] = useState('');
   const [storagePrice, setStoragePrice] = useState(STORAGE_PRICE_FALLBACK);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -60,6 +64,15 @@ function App() {
   const [recent, setRecent] = useState<string[]>(() => JSON.parse(localStorage.getItem('kutu:testnet:circles') || '[]') as string[]);
   const [create, setCreate] = useState({ name:'', description:'', contribution:'0.1', collateral:'0.1', members:'2', interval:'86400' });
   const [joinBudget, setJoinBudget] = useState('0.01');
+
+  const rememberCircle = useCallback((id: string) => {
+    setRecent((current) => {
+      const ids = [id, ...current.filter((item) => item !== id)].slice(0, 12);
+      if (ids.length === current.length && ids.every((item, index) => item === current[index])) return current;
+      localStorage.setItem('kutu:testnet:circles', JSON.stringify(ids));
+      return ids;
+    });
+  }, []);
 
   const refresh = useCallback(async (id = circleId, who = account) => {
     if (!id || !/^\d+$/.test(id)) return;
@@ -73,12 +86,36 @@ function App() {
     setRound(roundResult);
     if (who && nextMembers.some((member)=>member.account_id===who)) setAccounting(await rpc<Accounting>('get_member_accounting',{circle_id:parsed,account_id:who}));
     else setAccounting(null);
-    const ids=[id,...recent.filter((item)=>item!==id)].slice(0,12); setRecent(ids); localStorage.setItem('kutu:testnet:circles',JSON.stringify(ids));
-  },[account,circleId,recent]);
+    rememberCircle(id);
+  },[account,circleId,rememberCircle]);
 
   useEffect(()=> { void rpc<string>('get_storage_price_yocto',{}).then(setStoragePrice).catch(()=>{}); void connector.getConnectedWallet().then(async({wallet:connected})=>{ const accounts=await connected.getAccounts({network:NETWORK});if(accounts[0]){setWallet(connected);setAccount(accounts[0].accountId);} }).catch(()=>{}); },[]);
   useEffect(()=> { if (circleId) void refresh(circleId).catch((e)=>setError(errorText(e))); },[circleId,refresh]);
   useEffect(()=> { if (!wallet) return; const update=(payload:{wallet:NearWalletBase;accounts:{accountId:string}[]})=>{setWallet(payload.wallet);setAccount(payload.accounts[0]?.accountId||'');}; const clear=()=>{setWallet(null);setAccount('');setAccounting(null);}; connector.on('wallet:signIn',update); connector.on('wallet:signOut',clear); return ()=>{connector.off('wallet:signIn',update);connector.off('wallet:signOut',clear);}; },[wallet]);
+  useEffect(() => {
+    let active = true;
+    const ids = [...new Set(recent.filter((id) => /^\d+$/.test(id)))];
+    setCreatedCircles([]);
+    setCreatedCirclesError('');
+    if (!account || ids.length === 0) {
+      setCreatedCirclesLoading(false);
+      return () => { active = false; };
+    }
+
+    setCreatedCirclesLoading(true);
+    void Promise.allSettled(ids.map((id) => rpc<Circle>('get_circle', { circle_id: Number(id) })))
+      .then((results) => {
+        if (!active) return;
+        const circles = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+        setCreatedCircles(circlesCreatedBy(circles, account));
+        if (results.some((result) => result.status === 'rejected')) {
+          setCreatedCirclesError('Some known circles could not be refreshed. Open a circle by ID and retry.');
+        }
+      })
+      .finally(() => { if (active) setCreatedCirclesLoading(false); });
+
+    return () => { active = false; };
+  }, [account, recent]);
 
   const isMember=!!account&&members.some((member)=>member.account_id===account);
   const ownMember=members.find((member)=>member.account_id===account);
@@ -90,7 +127,7 @@ function App() {
   const rememberTx=(hash:string,label:string)=> {const items=[{hash,label,time:Date.now()},...activity].slice(0,40);setActivity(items);localStorage.setItem('kutu:testnet:activity',JSON.stringify(items));};
   async function connect() { setBusy(true);setError('');try { const selected=await connector.connect();const accounts=await selected.getAccounts({network:NETWORK});if(!accounts[0])throw new Error('The wallet did not return a Testnet account.');setWallet(selected);setAccount(accounts[0].accountId);setNotice('Testnet wallet connected.'); }catch(e){setError(errorText(e));}finally{setBusy(false);} }
   async function disconnect() {try{await wallet?.signOut({network:NETWORK});await connector.disconnect(wallet||undefined);}catch(e){setError(errorText(e));}setWallet(null);setAccount('');setAccounting(null);}
-  async function transact(method:string,args:object,deposit='0',label=method) {if(!wallet||!account)throw new Error('Connect a NEAR Testnet wallet first.');if(!CONTRACT)throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local first.');setBusy(true);setError('');setNotice('Review and approve the transaction in your wallet.');try{const outcome=await wallet.signAndSendTransaction({network:NETWORK,signerId:account,receiverId:CONTRACT,actions:[{type:'FunctionCall',params:{methodName:method,args,gas:GAS,deposit}}]});const status=outcome.status as {SuccessValue?:string;Failure?:unknown};if(status.Failure)throw new Error(JSON.stringify(status.Failure));const hash=outcome.transaction?.hash||'';if(hash)rememberTx(hash,label);setNotice(`${label} confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}.`);await refresh(circleId,account);return status.SuccessValue?decodeBase64Utf8(status.SuccessValue):'';}catch(e){throw new Error(errorText(e));}finally{setBusy(false);}}
+  async function transact(method:string,args:object,deposit='0',label=method) {if(!wallet||!account)throw new Error('Connect a NEAR Testnet wallet first.');if(!CONTRACT)throw new Error('Set VITE_CONTRACT_ID in frontend/.env.local first.');setBusy(true);setError('');setCreatedCircleId('');setNotice('Review and approve the transaction in your wallet.');try{const outcome=await wallet.signAndSendTransaction({network:NETWORK,signerId:account,receiverId:CONTRACT,actions:[{type:'FunctionCall',params:{methodName:method,args,gas:GAS,deposit}}]});const successValueBase64=getSuccessValueBase64(outcome.status);const hash=outcome.transaction?.hash||'';if(hash)rememberTx(hash,label);setNotice(`${label} confirmed on NEAR Testnet${hash?` · ${shortHash(hash)}`:''}.`);try{await refresh(circleId,account);}catch(refreshError){setError(`Transaction confirmed, but refreshing the previously open circle failed: ${errorText(refreshError)}`);}return {successValueBase64,transactionHash:hash};}catch(e){throw new Error(errorText(e));}finally{setBusy(false);}}
   async function run(action:()=>Promise<unknown>) {try{await action();}catch(e){setError(errorText(e));setNotice('');}}
   async function createCircle() {
     const contribution=yoctoFromNear(create.contribution);
@@ -103,12 +140,34 @@ function App() {
     const intervalNumber=Number(interval);
     if(BigInt(intervalNumber)!==interval)throw new Error('Payment interval cannot be represented exactly as a JSON number.');
     const storageDeposit=(BigInt(storagePrice)*CREATE_STORAGE_BYTES_ESTIMATE).toString();
-    const value=await transact('create_circle',{args:{name:create.name,description:create.description||null,max_members:Number(create.members),contribution_yocto:contribution,security_deposit_yocto:collateral,payment_interval_ns:intervalNumber}},storageDeposit,'Create circle');
-    const id=decodeCircleId(value);
-    setCircleId(String(id));
-    setNotice(`Circle #${id} created. Join it explicitly to take a payout position.`);
+    const result=await transact('create_circle',{args:{name:create.name,description:create.description||null,max_members:Number(create.members),contribution_yocto:contribution,security_deposit_yocto:collateral,payment_interval_ns:intervalNumber}},storageDeposit,'Create circle');
+    let id: number;
+    try {
+      id = circleIdFromSuccessValue(result.successValueBase64);
+    } catch (e) {
+      const tx = result.transactionHash ? ` Transaction: ${result.transactionHash}.` : '';
+      setNotice(`The create transaction was confirmed on NEAR Testnet, but its returned circle ID could not be read.${tx}`);
+      setError(`Creation was not reported as failed. Check the transaction and search for the circle on-chain. ${errorText(e)}`);
+      return;
+    }
+
+    const idText = String(id);
+    setCircleId(idText);
+    setCreatedCircleId(idText);
+    rememberCircle(idText);
+    let verifiedCircle: Circle;
+    try {
+      verifiedCircle = await rpc<Circle>('get_circle', { circle_id: id });
+      if (verifiedCircle.id !== id || verifiedCircle.creator !== account || verifiedCircle.name !== create.name) {
+        throw new Error('The returned circle does not match the creation transaction account and name.');
+      }
+      setNotice(`Circle created successfully! Circle ID: #${verifiedCircle.id}. Name: ${verifiedCircle.name}. Creator: ${verifiedCircle.creator}.`);
+    } catch (e) {
+      setNotice(`Circle creation was confirmed. Circle ID: #${id}. Name: ${create.name}. Creator: ${account}.`);
+      setError(`The contract returned circle #${id}, but its follow-up view could not be verified: ${errorText(e)}`);
+    }
   }
-  function decodeCircleId(base64:string) {const decoded=decodeBase64Utf8(base64);try{return Number(JSON.parse(decoded) as string|number);}catch{return Number(decoded);}}
+  function openCircle(id: string) { setCircleId(id); document.getElementById('circles')?.scrollIntoView({ behavior: 'smooth' }); }
   async function doJoin() {if(!circle)throw new Error('Load a circle first.');const storage=yoctoFromNear(joinBudget);const deposit=(BigInt(circle.security_deposit_yocto)+BigInt(storage)).toString();await transact('join_circle',{circle_id:circle.id},deposit,'Join circle');}
   async function doExactPayment(method:string,label:string) {if(!circle)throw new Error('Load a circle first.');const amount=circle.contribution_yocto;await transact(method,{circle_id:circle.id},amount,label);}
   function transferSlot(t:Transfer, memberPosition?:number, roundNumber?:number) {if(t.kind==='Payout')return {RoundPayout:roundNumber};if(t.kind==='DepositRefund')return {MemberDepositRefund:memberPosition};if(t.kind==='CancellationRefund')return {MemberCancellationRefund:memberPosition};if(t.kind==='StorageAllowanceRefund')return memberPosition?{MemberStorageRefund:memberPosition}:'CircleStorageRefund';throw new Error('Unknown transfer type.');}
@@ -120,9 +179,10 @@ function App() {
     <main id="top">
       <section className="hero"><div className="hero-copy"><div className="eyebrow"><span className="eyebrow-line"/>COMMUNITY SAVINGS, ON-CHAIN</div><h1>Good things<br/>grow <em>together.</em></h1><p>A simple, transparent way for people to save together. Take turns receiving the pot, with every contribution and payout visible on NEAR.</p><div className="hero-actions"><a className="button button-dark" href="#create">Start a circle <span>↗</span></a><a className="text-link" href="#circles">Explore a circle <span>↓</span></a></div><div className="hero-foot"><span className="pulse"/> LIVE ON NEAR TESTNET <span className="foot-dot">·</span> NON-CUSTODIAL BY DESIGN</div></div><div className="hero-art" aria-label="Illustration of a rotating savings circle"><div className="art-sun"/><div className="art-ring art-ring-one"/><div className="art-ring art-ring-two"/><div className="art-center"><span>the pot</span><strong>{circle?near((BigInt(circle.contribution_yocto)*BigInt(circle.target_members)).toString()):'— NEAR'}</strong><small>{circle?`${circle.target_members} people · one shared goal`:'ONE CIRCLE, MANY POSSIBILITIES'}</small></div><div className="orbit-tag tag-one"><span className="avatar avatar-peach">A</span><span>save a little<br/><b>every round</b></span></div><div className="orbit-tag tag-two"><span className="avatar avatar-sage">B</span><span>take turns<br/><b>getting the pot</b></span></div><div className="orbit-tag tag-three"><span className="avatar avatar-lilac">C</span><span>keep it clear<br/><b>on-chain</b></span></div><div className="spark spark-a">✳</div><div className="spark spark-b">✦</div></div></section>
       <section className="ticker"><span>OPEN MEMBERSHIP</span><b>✳</b><span>FIXED PAYOUT ORDER</span><b>✳</b><span>ON-CHAIN TRANSPARENCY</span><b>✳</b><span>NEAR TESTNET</span></section>
-      {error&&<div className="message message-error" role="alert"><span>!</span><div><b>Something needs attention</b><p>{error}</p></div><button onClick={()=>setError('')} aria-label="Dismiss">×</button></div>}{notice&&<div className="message message-success" role="status"><span>✓</span><p>{notice}</p><button onClick={()=>setNotice('')} aria-label="Dismiss">×</button></div>}
+      {error&&<div className="message message-error" role="alert"><span>!</span><div><b>Something needs attention</b><p>{error}</p></div><button onClick={()=>setError('')} aria-label="Dismiss">×</button></div>}{notice&&<div className="message message-success" role="status"><span>✓</span><div><p>{notice}</p>{createdCircleId&&<button className="button button-light button-small" onClick={()=>openCircle(createdCircleId)}>View circle #{createdCircleId} <span>↗</span></button>}</div><button onClick={()=>setNotice('')} aria-label="Dismiss">×</button></div>}
       <section className="section create-section" id="create"><div className="section-heading"><div><div className="eyebrow"><span className="eyebrow-line"/>MAKE IT YOURS</div><h2>A circle that<br/><em>fits your people.</em></h2></div><p>Pick the contribution, set the pace, and invite the people you trust. The rules are fixed once the circle starts.</p></div><div className="create-layout"><div className="create-card"><div className="card-top"><div><span className="step-number">01</span><h3>Set up your circle</h3></div><span className="lock-label">RULES LOCK AT START</span></div><div className="form-grid"><label className="field field-wide">Circle name<input maxLength={64} value={create.name} onChange={(e)=>setCreate({...create,name:e.target.value})} placeholder="e.g. Sunday supper club"/><small>{new TextEncoder().encode(create.name).length}/64 UTF-8 bytes</small></label><label className="field field-wide">A short description <span>optional</span><textarea maxLength={280} value={create.description} onChange={(e)=>setCreate({...create,description:e.target.value})} placeholder="What are you saving toward?" rows={2}/><small>{new TextEncoder().encode(create.description).length}/280 UTF-8 bytes</small></label><label className="field">Contribution each round<div className="input-unit"><input inputMode="decimal" value={create.contribution} onChange={(e)=>setCreate({...create,contribution:e.target.value})}/><span>NEAR</span></div></label><label className="field">Security deposit per member<div className="input-unit"><input inputMode="decimal" value={create.collateral} onChange={(e)=>setCreate({...create,collateral:e.target.value})}/><span>NEAR</span></div></label><label className="field">Member target<select value={create.members} onChange={(e)=>setCreate({...create,members:e.target.value})}>{Array.from({length:9},(_,i)=>i+2).map((n)=><option key={n} value={n}>{n} members</option>)}</select></label><label className="field">Time to contribute · seconds<input type="number" min="60" max="31536000" step="1" value={create.interval} onChange={(e)=>setCreate({...create,interval:e.target.value})}/><small>60 seconds to 365 days</small></label></div><div className="storage-note"><span className="storage-icon">◈</span><div><b>Separate storage funding</b><p>Creation attaches the current Testnet storage price × 6,000 bytes. Sandbox measured 4,545 bytes for circle creation; the extra room covers maximum text fields. The contract measures actual storage and returns excess. Occupied storage is not refundable.</p></div></div><button className="button button-dark create-submit" disabled={busy||!account||!CONTRACT} onClick={()=>void run(createCircle)}>Review & create circle <span>↗</span></button>{!CONTRACT&&<p className="setup-hint">Add your deployed Testnet contract ID to <code>frontend/.env.local</code> to enable transactions.</p>}</div><aside className="aside-note"><div className="note-index">A NOTE ON THE ORDER</div><div className="order-visual"><div className="order-row"><span>01</span><i className="order-dot dot-filled"/><div><b>First to join</b><small>receives the first pot</small></div><span className="order-arrow">↗</span></div><div className="order-row"><span>02</span><i className="order-dot"/><div><b>Next to join</b><small>receives the second pot</small></div></div><div className="order-row"><span>03</span><i className="order-dot"/><div><b>And so on</b><small>one turn each</small></div></div></div><div className="aside-rule"/><p>You’ll still need to join your own circle after creating it. Every member earns a permanent payout position in the order they successfully join.</p></aside></div></section>
       <section className="section circles-section" id="circles"><div className="section-heading compact"><div><div className="eyebrow"><span className="eyebrow-line"/>YOUR CIRCLE SPACE</div><h2>Find your <em>people.</em></h2></div><p>Open a circle by its ID. Share the ID with members so they can join from their own wallet.</p></div><div className="circle-finder"><span className="finder-icon">⌕</span><input aria-label="Circle ID" value={circleId} onChange={(e)=>setCircleId(e.target.value.replace(/\D/g,''))} placeholder="Enter a circle ID" onKeyDown={(e)=>e.key==='Enter'&&void refresh()}/><button className="button button-dark button-small" disabled={!circleId||busy} onClick={()=>void refresh()}>Open circle <span>↗</span></button></div>{recent.length>0&&<div className="recent-row"><span>RECENT</span>{recent.map((id)=><button key={id} className={id===circleId?'recent-chip selected':'recent-chip'} onClick={()=>setCircleId(id)}>#{id}</button>)}</div>}
+      <div className="created-circles" aria-labelledby="created-circles-title"><div className="created-circles-heading"><div><span className="panel-kicker">ON-CHAIN CREATOR CHECK</span><h3 id="created-circles-title">My Created Circles</h3></div><p>This checks circles opened or created in this browser against the contract. Search by ID to add another circle here.</p></div>{!account?<p className="created-circles-state">Connect a Testnet wallet to check circles for that account.</p>:createdCirclesLoading?<p className="created-circles-state" role="status">Loading your known circles…</p>:createdCircles.length>0?<div className="created-circles-list">{createdCircles.map((item)=><button key={item.id} className="created-circle-row" onClick={()=>openCircle(String(item.id))}><span className={`status-tag status-${item.status.toLowerCase()}`}><i/>{item.status}</span><span className="created-circle-name"><b>{item.name}</b><small>Circle #{item.id}</small></span><span className="created-circle-members">{item.member_count} / {item.target_members} members</span><span aria-hidden="true">↗</span></button>)}</div>:<p className="created-circles-state">No circles created by this wallet were found among this browser’s known circle IDs. Open a circle by ID to check it.</p>}{createdCirclesError&&<p className="created-circles-error" role="alert">{createdCirclesError}</p>}</div>
       {circle?<div className="dashboard"><div className="dashboard-head"><div><span className={`status-tag status-${circle.status.toLowerCase()}`}><i/>{circle.status}</span><h3>{circle.name}</h3><p>{circle.description||'A community savings circle'} <span>·</span> Circle #{circle.id}</p></div><div className="dashboard-actions">{account&&!isMember&&circle.status==='Open'&&<button className="button button-dark" disabled={busy} onClick={()=>void run(doJoin)}>Join circle <span>↗</span></button>}{isMember&&circle.status==='Open'&&<button className="button button-dark" disabled={busy} onClick={()=>void run(doJoin)}>Join as a member <span>↗</span></button>}<button className="button button-light button-small" disabled={busy} onClick={()=>void refresh()}>↻ Refresh</button></div></div>
       <div className="join-storage"><label>Extra storage allowance<div className="input-unit"><input inputMode="decimal" value={joinBudget} onChange={(e)=>setJoinBudget(e.target.value)}/><span>NEAR</span></div></label><p>Join attaches {near(joinDeposit)} total: collateral plus this allowance. The contract charges storage at {near(storagePrice)} per byte and returns any excess. Choose an allowance that covers actual storage use.</p></div><div className="stats-grid"><Stat label="Contribution / round" value={near(circle.contribution_yocto)}/><Stat label="Members" value={`${circle.member_count} / ${circle.target_members}`}/><Stat label="Payment window" value={formatInterval(circle.payment_interval_ns)}/><Stat label="Round" value={circle.status==='Completed'?'Complete':`${circle.current_round+1} of ${circle.target_members}`}/></div>
       <div className="dashboard-columns"><div className="panel"><div className="panel-heading"><div><span className="panel-kicker">THE PEOPLE</span><h4>Payout order</h4></div><span className="member-count">{circle.member_count} members</span></div><div className="member-list">{members.map((member)=>{const row=round?.contributions.find((item)=>item.member_position===member.payout_position);return <div className={`member-row ${member.account_id===account?'member-you':''}`} key={member.account_id}><span className="position">{String(member.payout_position).padStart(2,'0')}</span><span className={`avatar mini avatar-${['peach','sage','lilac','blue'][member.payout_position%4]}`}>{member.account_id.slice(0,1).toUpperCase()}</span><div className="member-main"><b>{member.account_id}{member.account_id===account&&<em>you</em>}</b><small>{member.payout_position===round?.recipient_position?'Payout recipient':`Payout position ${member.payout_position}`}</small></div><div className="member-funds"><b>{row&&(BigInt(row.direct_payment_yocto)>0n||BigInt(row.collateral_substitution_yocto)>0n)?'Ready':'Awaiting'}</b><small>Collateral {near(member.collateral_remaining_yocto)}</small></div></div>})}{members.length<circle.target_members&&<div className="open-slot"><span>＋</span>{circle.target_members-members.length} {circle.target_members-members.length===1?'place':'places'} left · share circle #{circle.id}</div>}</div></div>
